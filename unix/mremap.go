@@ -6,16 +6,27 @@
 
 package unix
 
-import "unsafe"
+import (
+	"sync"
+	"unsafe"
+)
 
 type mremapMmapper struct {
 	mmapper
 	mremap func(oldaddr uintptr, oldlength uintptr, newlength uintptr, flags int, newaddr uintptr) (xaddr uintptr, err error)
 }
 
+func createShards2() []map[*byte][]byte {
+	active := make([]map[*byte][]byte, MMAP_SLICES)
+	for i := 0; i < MMAP_SLICES; i++ {
+		active[i] = make(map[*byte][]byte)
+	}
+	return active
+}
+
 var mapper = &mremapMmapper{
 	mmapper: mmapper{
-		active:       createShards(),
+		active:       createShards2(),
 		mmap:         mmap,
 		munmap:       munmap,
 		shardedLocks: make([]*sync.Mutex, MMAP_SLICES),
