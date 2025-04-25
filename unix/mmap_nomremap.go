@@ -6,8 +6,19 @@
 
 package unix
 
+import "sync"
+
+func createShards() []map[*byte][]byte {
+	active := make([]map[*byte][]byte, MMAP_SLICES)
+	for i := 0; i < MMAP_SLICES; i++ {
+		active[i] = make(map[*byte][]byte)
+	}
+	return active
+}
+
 var mapper = &mmapper{
-	active: make(map[*byte][]byte),
-	mmap:   mmap,
-	munmap: munmap,
+	active:       createShards(),
+	mmap:         mmap,
+	munmap:       munmap,
+	shardedLocks: make([]*sync.Mutex, MMAP_SLICES),
 }

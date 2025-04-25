@@ -8,6 +8,7 @@ package unix
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"sort"
 	"sync"
 	"syscall"
@@ -95,11 +96,13 @@ func clen(n []byte) int {
 
 // Mmap manager, for use by operating system-specific implementations.
 
+const MMAP_SLICES = 50
+
 type mmapper struct {
-	sync.Mutex
-	active map[*byte][]byte // active mappings; key is last byte in mapping
-	mmap   func(addr, length uintptr, prot, flags, fd int, offset int64) (uintptr, error)
-	munmap func(addr uintptr, length uintptr) error
+	shardedLocks []*sync.Mutex
+	active       []map[*byte][]byte // active mappings; key is last byte in mapping
+	mmap         func(addr, length uintptr, prot, flags, fd int, offset int64) (uintptr, error)
+	munmap       func(addr uintptr, length uintptr) error
 }
 
 func (m *mmapper) Mmap(fd int, offset int64, length int, prot int, flags int) (data []byte, err error) {
@@ -118,9 +121,12 @@ func (m *mmapper) Mmap(fd int, offset int64, length int, prot int, flags int) (d
 
 	// Register mapping in m and return it.
 	p := &b[cap(b)-1]
-	m.Lock()
-	defer m.Unlock()
-	m.active[p] = b
+
+	index := getShard(p)
+
+	m.shardedLocks[index].Lock()
+	defer m.shardedLocks[index].Unlock()
+	m.active[index][p] = b
 	return b, nil
 }
 
@@ -131,9 +137,11 @@ func (m *mmapper) Munmap(data []byte) (err error) {
 
 	// Find the base of the mapping.
 	p := &data[cap(data)-1]
-	m.Lock()
-	defer m.Unlock()
-	b := m.active[p]
+	index := getShard(p)
+
+	m.shardedLocks[index].Lock()
+	defer m.shardedLocks[index].Unlock()
+	b := m.active[index][p]
 	if b == nil || &b[0] != &data[0] {
 		return EINVAL
 	}
@@ -142,8 +150,22 @@ func (m *mmapper) Munmap(data []byte) (err error) {
 	if errno := m.munmap(uintptr(unsafe.Pointer(&b[0])), uintptr(len(b))); errno != nil {
 		return errno
 	}
-	delete(m.active, p)
+	delete(m.active[index], p)
 	return nil
+}
+
+func getShard(p *byte) int {
+	pointerBytes := make([]byte, unsafe.Sizeof(p))
+	*(*uintptr)(unsafe.Pointer(&pointerBytes[0])) = uintptr(unsafe.Pointer(p))
+	hash := sha256.Sum256(pointerBytes)
+
+	// Step 2: Convert hash to integer between 0 and 49
+	// One way: sum all bytes and mod 50
+	var sum uint64
+	for _, b := range hash {
+		sum += uint64(b)
+	}
+	return int(sum % 50)
 }
 
 func Mmap(fd int, offset int64, length int, prot int, flags int) (data []byte, err error) {

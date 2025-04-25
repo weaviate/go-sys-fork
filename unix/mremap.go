@@ -6,18 +6,30 @@
 
 package unix
 
-import "unsafe"
+import (
+	"sync"
+	"unsafe"
+)
 
 type mremapMmapper struct {
 	mmapper
 	mremap func(oldaddr uintptr, oldlength uintptr, newlength uintptr, flags int, newaddr uintptr) (xaddr uintptr, err error)
 }
 
+func createShards2() []map[*byte][]byte {
+	active := make([]map[*byte][]byte, MMAP_SLICES)
+	for i := 0; i < MMAP_SLICES; i++ {
+		active[i] = make(map[*byte][]byte)
+	}
+	return active
+}
+
 var mapper = &mremapMmapper{
 	mmapper: mmapper{
-		active: make(map[*byte][]byte),
-		mmap:   mmap,
-		munmap: munmap,
+		active:       createShards2(),
+		mmap:         mmap,
+		munmap:       munmap,
+		shardedLocks: make([]*sync.Mutex, MMAP_SLICES),
 	},
 	mremap: mremap,
 }
@@ -28,22 +40,31 @@ func (m *mremapMmapper) Mremap(oldData []byte, newLength int, flags int) (data [
 	}
 
 	pOld := &oldData[cap(oldData)-1]
-	m.Lock()
-	defer m.Unlock()
-	bOld := m.active[pOld]
+	indexOld := getShard(pOld)
+	m.shardedLocks[indexOld].Lock()
+	bOld := m.active[indexOld][pOld]
 	if bOld == nil || &bOld[0] != &oldData[0] {
+		m.shardedLocks[indexOld].Unlock()
 		return nil, EINVAL
 	}
+
 	newAddr, errno := m.mremap(uintptr(unsafe.Pointer(&bOld[0])), uintptr(len(bOld)), uintptr(newLength), flags, 0)
 	if errno != nil {
+		m.shardedLocks[indexOld].Unlock()
 		return nil, errno
 	}
+	if flags&mremapDontunmap == 0 {
+		delete(m.active[indexOld], pOld)
+	}
+	m.shardedLocks[indexOld].Unlock()
+
 	bNew := unsafe.Slice((*byte)(unsafe.Pointer(newAddr)), newLength)
 	pNew := &bNew[cap(bNew)-1]
-	if flags&mremapDontunmap == 0 {
-		delete(m.active, pOld)
-	}
-	m.active[pNew] = bNew
+	indexNew := getShard(pOld)
+	m.shardedLocks[indexNew].Lock()
+	defer m.shardedLocks[indexNew].Unlock()
+
+	m.active[indexNew][pNew] = bNew
 	return bNew, nil
 }
 
