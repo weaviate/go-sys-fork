@@ -15,9 +15,10 @@ type mremapMmapper struct {
 
 var mapper = &mremapMmapper{
 	mmapper: mmapper{
-		active: make(map[*byte][]byte),
-		mmap:   mmap,
-		munmap: munmap,
+		active:       createShards(),
+		mmap:         mmap,
+		munmap:       munmap,
+		shardedLocks: make([]*sync.Mutex, MMAP_SLICES),
 	},
 	mremap: mremap,
 }
