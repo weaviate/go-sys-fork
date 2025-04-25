@@ -29,22 +29,31 @@ func (m *mremapMmapper) Mremap(oldData []byte, newLength int, flags int) (data [
 	}
 
 	pOld := &oldData[cap(oldData)-1]
-	m.Lock()
-	defer m.Unlock()
-	bOld := m.active[pOld]
+	indexOld := getShard(pOld)
+	m[indexOld].Lock()
+	bOld := m.active[indexOld][pOld]
 	if bOld == nil || &bOld[0] != &oldData[0] {
+		m[indexOld].Unlock()
 		return nil, EINVAL
 	}
+	
 	newAddr, errno := m.mremap(uintptr(unsafe.Pointer(&bOld[0])), uintptr(len(bOld)), uintptr(newLength), flags, 0)
 	if errno != nil {
+		m[indexOld].Unlock()
 		return nil, errno
 	}
+	if flags&mremapDontunmap == 0 {
+		delete(m.active[indexOld], pOld)
+	}
+	m[indexOld].Unlock()
+
 	bNew := unsafe.Slice((*byte)(unsafe.Pointer(newAddr)), newLength)
 	pNew := &bNew[cap(bNew)-1]
-	if flags&mremapDontunmap == 0 {
-		delete(m.active, pOld)
-	}
-	m.active[pNew] = bNew
+	indexNew := getShard(pOld)
+	m[indexNew].Lock()
+	defer m[indexNew].Unlock()
+
+	m.active[indexNew][pNew] = bNew
 	return bNew, nil
 }
 
